@@ -1,0 +1,24 @@
+CADASTRAAI GIS -> FRONTEND HANDOFF
+
+File:
+cadastraai_detected_regions.geojson
+
+What it contains:
+- 25 polygon features generated from the AI .npy segmentation mask.
+- Each feature has:
+  feature_id
+  feature_type = detected_region
+  area_pixel2
+  review_status = pending
+  confidence = null (not available in this mask)
+
+IMPORTANT:
+- The polygons are in 512x512 PIXEL coordinate space.
+- The .npy mask contains no CRS or geographic transform.
+- Do NOT display these as real latitude/longitude coordinates.
+- For the current prototype/demo, use a local/pixel map coordinate system (e.g. Leaflet CRS.Simple) or overlay them against the corresponding 512x512 image.
+- Do not label these as legally verified parcels.
+- Do not assume feature_type is "building" until the AI member confirms what this specific mask represents.
+
+Next GIS integration:
+source georeferenced imagery/transform -> pixel-to-world conversion -> real GIS coordinates.
