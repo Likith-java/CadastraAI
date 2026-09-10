@@ -1,11 +1,11 @@
-# 🏗️ CadastraAI — Automated Cadastral Mapping with Frame-Field Learning
+# CadastraAI — Automated Cadastral Mapping with Frame-Field Learning
 
 > **Smart India Hackathon (SIH) Project**
 > AI-powered building footprint extraction and cadastral boundary delineation from satellite imagery using deep learning and frame-field regularization.
 
 ---
 
-## 📋 Table of Contents
+##  Table of Contents
 
 - [Overview](#overview)
 - [Architecture](#architecture)
