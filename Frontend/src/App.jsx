@@ -3,13 +3,14 @@ import { MapContainer, ImageOverlay, GeoJSON, useMap, CircleMarker, Marker, Popu
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
+const API_BASE = 'http://localhost:8000'; // confirm this matches your uvicorn port
+const DEFAULT_AOI_ID = '313e0e44cae54ef299065c8ceff7cf6d'; // fallback demo AOI; live upload+infer swaps this at runtime
+
 const DATA = {
-  quality: '/data/cadastraai_gis_quality_controlled.geojson',
-  detected: '/data/cadastraai_detected_regions.geojson',
-  polygons: '/data/btm_layout_0015_polygons.geojson',
-  image: '/data/btm_layout_0015_preview.jpeg',
-  tif: '/data/btm_layout_0015_georeferenced.tif'
+  // no backend endpoint produces source/ground-truth polygons yet - stays static
+  polygons: '/data/btm_layout_0015_polygons.geojson'
 };
+// fallback defaults; overwritten in place by the live /aoi/{aoi_id}/transform fetch below
 const TIFF = { left: 8639830.18113004, top: 1450316.1746829334, resolution: 0.5971642834780747, width: 512, height: 512 };
 
 const pixelToLatLng = ([x, y]) => L.latLng(TIFF.height - y, x);
@@ -36,12 +37,47 @@ function App() {
   const [quality, setQuality] = useState(null), [detected, setDetected] = useState(null), [polygons, setPolygons] = useState(null);
   const [loading, setLoading] = useState(true), [dark, setDark] = useState(false), [selected, setSelected] = useState(null);
   const [reviewOverrides, setReviewOverrides] = useState({}), [editing, setEditing] = useState(false), [draftGeometry, setDraftGeometry] = useState(null);
+  const [aoiId, setAoiId] = useState(DEFAULT_AOI_ID), [uploadStatus, setUploadStatus] = useState(null);
 
-  useEffect(() => {
-    Promise.all([fetch(DATA.quality).then(r => r.json()), fetch(DATA.detected).then(r => r.json()), fetch(DATA.polygons).then(r => r.json())])
-      .then(([q,d,p]) => { setQuality(worldToPixelGeoJSON(q)); setDetected(d); setPolygons(worldToPixelGeoJSON(p)); })
-      .catch(e => console.error('Actual GIS data load failed:', e)).finally(() => setLoading(false));
-  }, []);
+  const loadAoi = (id, opts) => {
+    const includeSource = !!(opts && opts.includeSource);
+    setLoading(true);
+    setSelected(null);
+    setReviewOverrides({});
+    Promise.all([
+      fetch(`${API_BASE}/aoi/${id}/transform`).then(r => r.json()),
+      fetch(`${API_BASE}/aoi/${id}/vectorize/frame_field`, { method: 'POST' }).then(r => r.json()),
+      includeSource ? fetch(DATA.polygons).then(r => r.json()).catch(() => ({ type: 'FeatureCollection', features: [] })) : Promise.resolve({ type: 'FeatureCollection', features: [] }),
+    ])
+      .then(([transform, result, p]) => {
+        Object.assign(TIFF, transform); // real per-AOI geotransform replaces the hardcoded fallback
+        setQuality(worldToPixelGeoJSON(result.quality)); // EPSG:3857 -> pixel space
+        setDetected(result.detected); // already pixel-space (Affine.identity() upstream)
+        setPolygons(worldToPixelGeoJSON(p));
+      })
+      .catch(e => console.error('Live backend fetch failed:', e)).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { loadAoi(DEFAULT_AOI_ID, { includeSource: true }); }, []);
+
+  const uploadAndInfer = async (file) => {
+    setUploadStatus('Uploading image…');
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const meta = await fetch(`${API_BASE}/aoi/upload`, { method: 'POST', body: form }).then(r => r.json());
+      setUploadStatus('Running live inference…');
+      await fetch(`${API_BASE}/aoi/${meta.aoi_id}/infer`, { method: 'POST' }).then(r => r.json());
+      setUploadStatus('Vectorizing detected footprints…');
+      setAoiId(meta.aoi_id);
+      loadAoi(meta.aoi_id, { includeSource: false });
+      setUploadStatus(`Live inference complete — new AOI ${meta.aoi_id.slice(0, 8)}…`);
+      setPage('map');
+    } catch (e) {
+      console.error('Upload/infer failed:', e);
+      setUploadStatus('Upload or inference failed — check backend console');
+    }
+  };
 
   const effectiveFeature = f => {
     if (!f) return null;
@@ -82,7 +118,7 @@ function App() {
   if (!logged) return <Login onLogin={() => setLogged(true)} />;
   return <div className={dark ? 'app dark' : 'app'}>
     <aside className="sidebar"><Logo/><div className="section-label">WORKSPACE</div>{nav.map(([id,label,icon]) => <button key={id} className={page===id?'nav active':'nav'} onClick={() => setPage(id)}><span className="nav-icon">{icon}</span>{label}{id==='review' && stats.pending > 0 && <span className="nav-count">{stats.pending}</span>}</button>)}<div className="sidebar-bottom"><button className="nav" onClick={() => setPage('settings')}><span className="nav-icon">⚙</span>Settings</button><button className="nav" onClick={() => setPage('help')}><span className="nav-icon">?</span>Help</button><div className="user-mini"><div className="avatar">PV</div><div><b>Project Admin</b><small>DoLR Workspace</small></div></div></div></aside>
-    <main className="main"><header><div><div className="crumb">DoLR / CADASTRA AI</div><h1>{pageTitle(page)}</h1></div><div className="header-actions"><span className="live"><i/> Live GIS Dataset</span><button className="icon-btn" onClick={() => setDark(!dark)}>{dark?'☀':'◐'}</button></div></header><div className="content">{loading?<Loader/>:<Page page={page} stats={stats} quality={effectiveQuality} rawQuality={quality} detected={detected} polygons={polygons} selected={selected} setSelected={selectFeature} setPage={setPage} updateReview={updateReview} accept={accept} reject={reject} startEdit={startEdit} saveEdit={saveEdit} editing={editing} draftGeometry={draftGeometry} updateVertex={updateVertex} setEditing={setEditing} setDraftGeometry={setDraftGeometry} exportData={exportData}/>}</div></main>
+    <main className="main"><header><div><div className="crumb">DoLR / CADASTRA AI</div><h1>{pageTitle(page)}</h1></div><div className="header-actions"><span className="live"><i/> Live GIS Dataset</span><button className="icon-btn" onClick={() => setDark(!dark)}>{dark?'☀':'◐'}</button></div></header><div className="content">{loading?<Loader/>:<Page page={page} stats={stats} quality={effectiveQuality} rawQuality={quality} detected={detected} polygons={polygons} selected={selected} setSelected={selectFeature} setPage={setPage} updateReview={updateReview} accept={accept} reject={reject} startEdit={startEdit} saveEdit={saveEdit} editing={editing} draftGeometry={draftGeometry} updateVertex={updateVertex} setEditing={setEditing} setDraftGeometry={setDraftGeometry} exportData={exportData} aoiId={aoiId} uploadAndInfer={uploadAndInfer} uploadStatus={uploadStatus}/>}</div></main>
   </div>;
 }
 function pageTitle(p){return ({dashboard:'Dashboard',surveys:'Surveys',map:'GIS Map Explorer',review:'Review Queue',analytics:'Analytics',data:'Data Management',export:'Export',settings:'Settings',help:'Help'})[p]||'Dashboard'}
@@ -94,13 +130,13 @@ function Dashboard({stats,setPage}){return <><div className="hero-row"><div><div
 function Stat({label,value,note}){return <div className="card stat"><span className="muted">{label}</span><strong>{value}</strong><small>{note}</small></div>}
 function CardHead({title,action,onClick}){return <div className="card-head"><h3>{title}</h3>{action&&<button className="link-btn" onClick={onClick}>{action} →</button>}</div>}
 
-function GISMap({quality,detected,polygons,selected,setSelected,accept,reject,startEdit,saveEdit,editing,draftGeometry,updateVertex,setEditing,setDraftGeometry,setPage}){
+function GISMap({quality,detected,polygons,selected,setSelected,accept,reject,startEdit,saveEdit,editing,draftGeometry,updateVertex,setEditing,setDraftGeometry,setPage,aoiId,uploadAndInfer,uploadStatus}){
   const bounds=[[0,0],[512,512]];
   const [showQC,setShowQC]=useState(true),[showAI,setShowAI]=useState(true),[showSource,setShowSource]=useState(true);
   const [rejecting,setRejecting]=useState(false),[reason,setReason]=useState(''),[note,setNote]=useState('');
   const styleQ=f=>{const s=f.properties?.review_status||'pending';return {color:s==='approved'?'#16a34a':s==='rejected'?'#dc2626':f.properties?.review_required?'#f59e0b':'#2563eb',weight:3,fillOpacity:.13};};
   const doReject=()=>{if(!selected)return;reject(selected.properties.feature_id,reason||'Other',note);setRejecting(false);setReason('');setNote('');setSelected({...selected,properties:{...selected.properties,review_status:'rejected',review_required:false,rejection_reason:reason||'Other',review_note:note}});};
-  return <div className="map-layout"><div className="map-card"><MapContainer crs={L.CRS.Simple} bounds={bounds} maxBounds={bounds} minZoom={-2} maxZoom={3} zoom={0} style={{height:'100%',width:'100%'}}><ImageOverlay url={DATA.image} bounds={bounds} opacity={0.96}/>{showSource&&polygons&&<GeoJSON data={polygons} style={()=>({color:'#22c55e',weight:1,fillOpacity:.035})} coordsToLatLng={pixelToLatLng}/>} {showAI&&detected&&<GeoJSON data={detected} style={()=>({color:'#7c3aed',weight:1,fillOpacity:.06,dashArray:'4 4'})} coordsToLatLng={pixelToLatLng}/>} {showQC&&quality&&<GeoJSON data={quality} style={styleQ} onEachFeature={(f,l)=>l.on({click:()=>setSelected(f)})} coordsToLatLng={pixelToLatLng}/>} {editing&&draftGeometry&&<EditVertices ring={draftGeometry} updateVertex={updateVertex}/>}<FitBounds bounds={bounds}/></MapContainer><div className="map-tools"><label><input type="checkbox" checked={showQC} onChange={e=>setShowQC(e.target.checked)}/> QC features</label><label><input type="checkbox" checked={showAI} onChange={e=>setShowAI(e.target.checked)}/> AI regions</label><label><input type="checkbox" checked={showSource} onChange={e=>setShowSource(e.target.checked)}/> Source</label></div><div className="map-legend"><b>Legend</b><span><i className="line blue"/> Pending</span><span><i className="line green"/> Approved</span><span><i className="line red"/> Rejected</span><span><i className="line purple"/> AI output</span></div></div><div className="side-panel"><div className="eyebrow">GIS EXPLORER</div><h2>Feature inspection</h2><p className="muted">Click a QC feature on the map to open its human-verification workflow.</p>{selected?<ReviewPanel feature={selected} accept={accept} setSelected={setSelected} rejecting={rejecting} setRejecting={setRejecting} reason={reason} setReason={setReason} note={note} setNote={setNote} doReject={doReject} startEdit={startEdit} saveEdit={saveEdit} editing={editing} setEditing={setEditing}/>:<><div className="layer-list"><div><b>QC features</b><span>{quality?.features?.length||0}</span></div><div><b>AI regions</b><span>{detected?.features?.length||0}</span></div><div><b>Source polygons</b><span>{polygons?.features?.length||0}</span></div></div><div className="empty-select"><div>⌖</div><b>Select a QC feature</b><p>Choose a polygon to inspect attributes and record a review decision.</p></div></>}{editing&&<div className="edit-hint"><b>Boundary editing mode</b><p>Drag the vertex handles on the map, then save the boundary.</p><button className="small-btn" onClick={()=>{setEditing(false);setDraftGeometry(null)}}>Cancel edit</button></div>}</div></div>
+  return <div className="map-layout"><div className="map-card"><MapContainer crs={L.CRS.Simple} bounds={bounds} maxBounds={bounds} minZoom={-2} maxZoom={3} zoom={0} style={{height:'100%',width:'100%'}}><ImageOverlay url={`${API_BASE}/aoi/${aoiId}/preview.jpg`} bounds={bounds} opacity={0.96}/>{showSource&&polygons&&<GeoJSON data={polygons} style={()=>({color:'#22c55e',weight:1,fillOpacity:.035})} coordsToLatLng={pixelToLatLng}/>} {showAI&&detected&&<GeoJSON data={detected} style={()=>({color:'#7c3aed',weight:1,fillOpacity:.06,dashArray:'4 4'})} coordsToLatLng={pixelToLatLng}/>} {showQC&&quality&&<GeoJSON data={quality} style={styleQ} onEachFeature={(f,l)=>l.on({click:()=>setSelected(f)})} coordsToLatLng={pixelToLatLng}/>} {editing&&draftGeometry&&<EditVertices ring={draftGeometry} updateVertex={updateVertex}/>}<FitBounds bounds={bounds}/></MapContainer><div className="map-tools"><label><input type="checkbox" checked={showQC} onChange={e=>setShowQC(e.target.checked)}/> QC features</label><label><input type="checkbox" checked={showAI} onChange={e=>setShowAI(e.target.checked)}/> AI regions</label><label><input type="checkbox" checked={showSource} onChange={e=>setShowSource(e.target.checked)}/> Source</label></div><div className="upload-tools"><label className="primary" style={{cursor:'pointer',padding:'6px 12px',borderRadius:6,display:'inline-block'}}>⇪ Upload new image (live inference)<input type="file" accept="image/*,.tif,.tiff" style={{display:'none'}} onChange={e=>{const f=e.target.files&&e.target.files[0];if(f)uploadAndInfer(f);e.target.value='';}}/></label>{uploadStatus&&<span style={{fontSize:9}}>{uploadStatus}</span>}</div><div className="map-legend"><b>Legend</b><span><i className="line blue"/> Pending</span><span><i className="line green"/> Approved</span><span><i className="line red"/> Rejected</span><span><i className="line purple"/> AI output</span></div></div><div className="side-panel"><div className="eyebrow">GIS EXPLORER</div><h2>Feature inspection</h2><p className="muted">Click a QC feature on the map to open its human-verification workflow.</p>{selected?<ReviewPanel feature={selected} accept={accept} setSelected={setSelected} rejecting={rejecting} setRejecting={setRejecting} reason={reason} setReason={setReason} note={note} setNote={setNote} doReject={doReject} startEdit={startEdit} saveEdit={saveEdit} editing={editing} setEditing={setEditing}/>:<><div className="layer-list"><div><b>QC features</b><span>{quality?.features?.length||0}</span></div><div><b>AI regions</b><span>{detected?.features?.length||0}</span></div><div><b>Source polygons</b><span>{polygons?.features?.length||0}</span></div></div><div className="empty-select"><div>⌖</div><b>Select a QC feature</b><p>Choose a polygon to inspect attributes and record a review decision.</p></div></>}{editing&&<div className="edit-hint"><b>Boundary editing mode</b><p>Drag the vertex handles on the map, then save the boundary.</p><button className="small-btn" onClick={()=>{setEditing(false);setDraftGeometry(null)}}>Cancel edit</button></div>}</div></div>
 }
 function EditVertices({ring,updateVertex}){return <>{ring.map((p,i)=><Marker key={i} position={pixelToLatLng(p)} draggable eventHandlers={{dragend:e=>updateVertex(i,e.target.getLatLng())}} icon={L.divIcon({className:'vertex-handle',html:'<span></span>',iconSize:[14,14],iconAnchor:[7,7]})}/>)}</>}
 function ReviewPanel({feature,accept,setSelected,rejecting,setRejecting,reason,setReason,note,setNote,doReject,startEdit,saveEdit,editing,setEditing}){const p=feature.properties||{}, status=p.review_status||'pending';return <div className="feature-details"><div className="review-title"><div><span className="eyebrow">FEATURE REVIEW</span><h3>Detected Feature #{p.feature_id??'—'}</h3></div><span className={`status ${status}`}>{STATUS[status]||status}</span></div><div className="prop"><span>Feature type</span><b>{p.class||'Detected feature'}</b></div><div className="prop"><span>Area</span><b>{p.area_m2==null?'—':`${Number(p.area_m2).toFixed(2)} m²`}</b></div><div className="prop"><span>Quality flag</span><b>{p.quality_flag||'—'}</b></div><div className="prop"><span>Review required</span><b>{p.review_required?'Yes':'No'}</b></div><div className="prop"><span>Confidence</span><b>{p.confidence==null?'Not available':p.confidence}</b></div>{p.rejection_reason&&<div className="prop"><span>Rejection reason</span><b>{p.rejection_reason}</b></div>}{p.boundary_edited&&<div className="edited-note">Boundary has been edited.</div>}<div className="review-question">Is this detection correct?</div><div className="review-actions"><button className="approve-btn" disabled={status==='approved'} onClick={()=>{accept(p.feature_id);setSelected({...feature,properties:{...p,review_status:'approved',review_required:false}})}}>✓ Accept</button><button className="reject-btn" disabled={status==='rejected'} onClick={()=>setRejecting(true)}>✕ Reject</button><button className="edit-btn" onClick={()=>startEdit(feature)}>{editing?'Editing…':'✎ Edit Boundary'}</button></div>{rejecting&&<div className="reject-box"><label>Rejection reason</label><select value={reason} onChange={e=>setReason(e.target.value)}><option value="">Select reason</option><option>Wrong boundary</option><option>False detection</option><option>Duplicate</option><option>Missing/incorrect feature</option><option>Other</option></select><label>Review notes</label><textarea value={note} onChange={e=>setNote(e.target.value)} placeholder="Add reviewer notes…"/><div className="inline-actions"><button className="small-btn" onClick={()=>setRejecting(false)}>Cancel</button><button className="reject-btn compact" onClick={doReject}>Confirm Reject</button></div></div>}{editing&&<button className="primary wide save-boundary" onClick={()=>saveEdit(p.feature_id)}>Save Boundary & Continue Review</button>}<div className="review-note"><b>Reviewer guidance</b><span>Accept only when the mapped boundary is suitable for the current QC workflow. Rejected items remain in the exported review history.</span></div></div>}

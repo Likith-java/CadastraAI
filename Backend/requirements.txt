@@ -1,0 +1,13 @@
+﻿fastapi
+uvicorn[standard]
+python-multipart
+torch
+torchvision
+segmentation-models-pytorch
+rasterio
+geopandas
+shapely
+scipy
+scikit-image
+numpy
+pillow

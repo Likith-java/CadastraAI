@@ -1,0 +1,23 @@
+﻿# Node
+node_modules/
+Frontend/node_modules/
+
+# Python
+venv/
+Backend/venv/
+__pycache__/
+*.pyc
+
+# Data / model artifacts (adjust if you want these versioned separately)
+Backend/aois/
+*.npz
+*.pt
+*.pth
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+
+Backend/uploads/
+Backend/models/*.pth
+Backend/__pycache__/
