@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 import torch
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image
@@ -42,7 +42,13 @@ def health():
 
 
 @app.post("/aoi/upload")
-async def upload_aoi(file: UploadFile = File(...)):
+async def upload_aoi(
+    file: UploadFile = File(...),
+    north: float | None = Form(None),
+    south: float | None = Form(None),
+    east: float | None = Form(None),
+    west: float | None = Form(None),
+):
     aoi_id = uuid.uuid4().hex
     d = AOI_ROOT / aoi_id
     d.mkdir(parents=True)
@@ -58,7 +64,17 @@ async def upload_aoi(file: UploadFile = File(...)):
 
         left = transform_affine.c
         top = transform_affine.f
-        resolution = transform_affine.a
+        resolution_x = transform_affine.a
+        resolution_y = -transform_affine.e
+
+        manual_bounds_used = False
+        if crs is None and None not in (north, south, east, west):
+            crs = "EPSG:4326"
+            left = west
+            top = north
+            resolution_x = (east - west) / width
+            resolution_y = (north - south) / height
+            manual_bounds_used = True
 
         band_count = min(src.count, 3)
         arr = src.read(list(range(1, band_count + 1)))
@@ -85,7 +101,8 @@ async def upload_aoi(file: UploadFile = File(...)):
     transform = {
         "left": left,
         "top": top,
-        "resolution": resolution,
+        "resolution_x": resolution_x,
+        "resolution_y": resolution_y,
         "width": width,
         "height": height,
     }
@@ -95,6 +112,7 @@ async def upload_aoi(file: UploadFile = File(...)):
         "original_filename": file.filename,
         "crs": crs,
         "transform": transform,
+        "manual_bounds_used": manual_bounds_used,
     }
     with (d / "meta.json").open("w") as f:
         json.dump(meta, f, indent=2)

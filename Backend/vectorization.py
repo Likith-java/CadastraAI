@@ -37,8 +37,10 @@ def load_geo_meta(aoi_id: str):
         raise FileNotFoundError(f"No meta.json for {aoi_id}")
     meta = json.loads(meta_path.read_text())
     tf = meta["transform"]
-    transform = Affine(tf["resolution"], 0, tf["left"], 0, -tf["resolution"], tf["top"])
-    crs = meta.get("crs", "EPSG:4326")
+    res_x = tf.get("resolution_x", tf.get("resolution"))
+    res_y = tf.get("resolution_y", tf.get("resolution"))
+    transform = Affine(res_x, 0, tf["left"], 0, -res_y, tf["top"])
+    crs = meta.get("crs") or "EPSG:4326"
     return transform, crs
 
 
@@ -97,13 +99,17 @@ def vectorize_watershed(aoi_id: str) -> dict:
     kept_ids = set(gdf_detected["instance_id"]) if not gdf_detected.empty else set()
 
     geo_polys = labels_to_polygons(labels, transform, mask_prob)
-    gdf_geo = gpd.GeoDataFrame(geo_polys, geometry="geometry", crs=crs)
-    if not gdf_geo.empty:
+    if geo_polys:
+        gdf_geo = gpd.GeoDataFrame(geo_polys, geometry="geometry", crs=crs)
         gdf_geo = gdf_geo[gdf_geo["instance_id"].isin(kept_ids)]
+    else:
+        gdf_geo = gpd.GeoDataFrame(columns=["instance_id", "feature_id", "geometry", "confidence"], geometry="geometry", crs=crs)
+    if not gdf_geo.empty:
         gdf_geo_3857 = gdf_geo.to_crs(epsg=3857)
         gdf_geo_3857["area_m2"] = gdf_geo_3857.geometry.area.round(2)
     else:
-        gdf_geo_3857 = gdf_geo
+        gdf_geo_3857 = gdf_geo.set_crs(epsg=3857, allow_override=True)
+        gdf_geo_3857["area_m2"] = []
 
     from vector_postprocess import clean_for_frontend
     gdf_clean = clean_for_frontend(gdf_geo_3857) if not gdf_geo_3857.empty else gdf_geo_3857

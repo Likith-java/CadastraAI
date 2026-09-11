@@ -12,6 +12,8 @@ from skimage import measure
 from shapely.geometry import Polygon
 import geopandas as gpd
 from rasterio.transform import Affine
+from vectorization import watershed_instances
+from skimage import measure as _measure_mod
 from rasterio.features import rasterize
 
 AOI_ROOT = Path("aois")
@@ -74,21 +76,33 @@ def vectorize_frame_field(aoi_id: str) -> dict:
         raise FileNotFoundError(f"No cached inference for {aoi_id}")
     data = np.load(npz_path)
     mask_prob, frame_field = data["mask"], data["frame_field"]
+    edge_prob = data["edge"]
 
     meta_path = AOI_ROOT / aoi_id / "meta.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"No meta.json for {aoi_id}")
     meta = json.loads(meta_path.read_text())
     tf = meta["transform"]
-    transform = Affine(tf["resolution"], 0, tf["left"], 0, -tf["resolution"], tf["top"])
-    crs = meta.get("crs", "EPSG:4326")
+    res_x = tf.get("resolution_x", tf.get("resolution"))
+    res_y = tf.get("resolution_y", tf.get("resolution"))
+    transform = Affine(res_x, 0, tf["left"], 0, -res_y, tf["top"])
+    crs = meta.get("crs") or "EPSG:4326"
 
     theta_map = decode_frame_field(frame_field)
-    binary_mask = (mask_prob > MASK_THRESH).astype(np.uint8)
-    contours = measure.find_contours(binary_mask, level=0.5)
+
+    # Separate touching buildings FIRST (same approach as the watershed path),
+    # then regularize each instance's own contour with the frame field.
+    labels = watershed_instances(mask_prob, edge_prob)
+    instance_ids = [int(v) for v in np.unique(labels) if v != 0]
 
     detected_polys, geo_polys = [], []
-    for i, contour in enumerate(contours):
+    for i in instance_ids:
+        inst_mask = (labels == i).astype(np.uint8)
+        inst_contours = _measure_mod.find_contours(inst_mask, level=0.5)
+        if not inst_contours:
+            continue
+        # a label can occasionally produce more than one contour ring; keep the largest
+        contour = max(inst_contours, key=lambda c: Polygon([(x, y) for y, x in c]).area if len(c) >= 3 else 0)
         reg_poly = regularize_contour(contour, theta_map)
         if reg_poly is None:
             continue
@@ -106,13 +120,22 @@ def vectorize_frame_field(aoi_id: str) -> dict:
         geo_coords = [transform * (x, y) for x, y in reg_poly.exterior.coords]
         geo_polys.append({"instance_id": i, "feature_id": i, "geometry": Polygon(geo_coords), "confidence": confidence})
 
-    gdf_detected = gpd.GeoDataFrame(detected_polys, geometry="geometry", crs=None)
-    gdf_geo = gpd.GeoDataFrame(geo_polys, geometry="geometry", crs=crs)
+    if detected_polys:
+        gdf_detected = gpd.GeoDataFrame(detected_polys, geometry="geometry", crs=None)
+    else:
+        gdf_detected = gpd.GeoDataFrame(columns=["instance_id", "feature_id", "geometry", "confidence"], geometry="geometry", crs=None)
+
+    if geo_polys:
+        gdf_geo = gpd.GeoDataFrame(geo_polys, geometry="geometry", crs=crs)
+    else:
+        gdf_geo = gpd.GeoDataFrame(columns=["instance_id", "feature_id", "geometry", "confidence"], geometry="geometry", crs=crs)
+
     if not gdf_geo.empty:
         gdf_geo_3857 = gdf_geo.to_crs(epsg=3857)
         gdf_geo_3857["area_m2"] = gdf_geo_3857.geometry.area.round(2)
     else:
-        gdf_geo_3857 = gdf_geo
+        gdf_geo_3857 = gdf_geo.set_crs(epsg=3857, allow_override=True)
+        gdf_geo_3857["area_m2"] = []
 
     from vector_postprocess import clean_for_frontend
     gdf_clean = clean_for_frontend(gdf_geo_3857) if not gdf_geo_3857.empty else gdf_geo_3857
